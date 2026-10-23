@@ -1,0 +1,55 @@
+name: Build and release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install Inno Setup
+        shell: powershell
+        run: |
+          $download = Join-Path $env:RUNNER_TEMP 'innosetup-6.7.3.exe'
+          Invoke-WebRequest 'https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe' -OutFile $download
+          $signature = Get-AuthenticodeSignature $download
+          if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'CN=Pyrsys B.V.') {
+            throw 'Inno Setup publisher verification failed.'
+          }
+          $compilerDir = Join-Path $env:RUNNER_TEMP 'InnoSetup'
+          $process = Start-Process $download -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/CURRENTUSER', '/NOICONS', ('/DIR="' + $compilerDir + '"')) -PassThru -Wait
+          if ($process.ExitCode -ne 0) { throw 'Inno Setup installation failed.' }
+      - name: Build and test
+        shell: powershell
+        run: .\build.ps1 -InnoCompiler "$env:RUNNER_TEMP\InnoSetup\ISCC.exe"
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ViceCityHotkeys-windows
+          path: |
+            dist/*
+            build/test-results.txt
+      - name: Publish tagged release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view $env:GITHUB_REF_NAME --json tagName *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $env:GITHUB_REF_NAME dist/* --clobber
+          } else {
+            gh release create $env:GITHUB_REF_NAME dist/* --title "Vice City Hotkeys $env:GITHUB_REF_NAME" --notes-file RELEASE_NOTES.md
+          }
+          if ($LASTEXITCODE -ne 0) { throw 'Release publication failed.' }
+
